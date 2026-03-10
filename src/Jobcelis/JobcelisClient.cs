@@ -98,10 +98,22 @@ public class JobcelisClient : IDisposable
     // -------------------------------------------------------------------------
 
     /// <summary>Create a webhook.</summary>
-    public Task<JsonElement> CreateWebhookAsync(string url, Dictionary<string, object?>? extra = null)
+    /// <param name="url">The webhook endpoint URL.</param>
+    /// <param name="extra">Optional extra fields (topics, secret, etc.).</param>
+    /// <param name="rateLimitMaxPerSecond">Optional max deliveries per second.</param>
+    /// <param name="rateLimitMaxPerMinute">Optional max deliveries per minute.</param>
+    public Task<JsonElement> CreateWebhookAsync(string url, Dictionary<string, object?>? extra = null,
+        int? rateLimitMaxPerSecond = null, int? rateLimitMaxPerMinute = null)
     {
         var body = new Dictionary<string, object?> { ["url"] = url };
         if (extra != null) foreach (var kv in extra) body[kv.Key] = kv.Value;
+        if (rateLimitMaxPerSecond != null || rateLimitMaxPerMinute != null)
+        {
+            var rateLimit = new Dictionary<string, object?>();
+            if (rateLimitMaxPerSecond != null) rateLimit["max_per_second"] = rateLimitMaxPerSecond;
+            if (rateLimitMaxPerMinute != null) rateLimit["max_per_minute"] = rateLimitMaxPerMinute;
+            body["rate_limit"] = rateLimit;
+        }
         return PostAsync("/api/v1/webhooks", body);
     }
 
@@ -117,6 +129,24 @@ public class JobcelisClient : IDisposable
     public Task<JsonElement> UpdateWebhookAsync(string webhookId, object data)
         => PatchAsync($"/api/v1/webhooks/{webhookId}", data);
 
+    /// <summary>Update a webhook with explicit rate limit parameters.</summary>
+    /// <param name="webhookId">The webhook ID.</param>
+    /// <param name="data">Fields to update (url, topics, secret, etc.).</param>
+    /// <param name="rateLimitMaxPerSecond">Optional max deliveries per second.</param>
+    /// <param name="rateLimitMaxPerMinute">Optional max deliveries per minute.</param>
+    public Task<JsonElement> UpdateWebhookAsync(string webhookId, Dictionary<string, object?> data,
+        int? rateLimitMaxPerSecond = null, int? rateLimitMaxPerMinute = null)
+    {
+        if (rateLimitMaxPerSecond != null || rateLimitMaxPerMinute != null)
+        {
+            var rateLimit = new Dictionary<string, object?>();
+            if (rateLimitMaxPerSecond != null) rateLimit["max_per_second"] = rateLimitMaxPerSecond;
+            if (rateLimitMaxPerMinute != null) rateLimit["max_per_minute"] = rateLimitMaxPerMinute;
+            data["rate_limit"] = rateLimit;
+        }
+        return PatchAsync($"/api/v1/webhooks/{webhookId}", data);
+    }
+
     /// <summary>Delete a webhook.</summary>
     public Task DeleteWebhookAsync(string webhookId)
         => DoDeleteAsync($"/api/v1/webhooks/{webhookId}");
@@ -128,6 +158,10 @@ public class JobcelisClient : IDisposable
     /// <summary>List available webhook templates.</summary>
     public Task<JsonElement> WebhookTemplatesAsync()
         => GetAsync("/api/v1/webhooks/templates");
+
+    /// <summary>Send a test delivery to a webhook.</summary>
+    public Task<JsonElement> TestWebhookAsync(string webhookId)
+        => PostAsync($"/api/v1/webhooks/{webhookId}/test", new { });
 
     // -------------------------------------------------------------------------
     // Deliveries
@@ -469,6 +503,26 @@ public class JobcelisClient : IDisposable
         => DoDeleteAsync("/api/v1/me/object");
 
     // -------------------------------------------------------------------------
+    // Retention & Purge
+    // -------------------------------------------------------------------------
+
+    /// <summary>Get current retention policy.</summary>
+    public Task<JsonElement> GetRetentionPolicyAsync()
+        => GetAsync("/api/v1/retention");
+
+    /// <summary>Update retention policy.</summary>
+    public Task<JsonElement> UpdateRetentionPolicyAsync(object policy)
+        => PatchAsync("/api/v1/retention", policy);
+
+    /// <summary>Preview a purge operation.</summary>
+    public Task<JsonElement> PreviewPurgeAsync(object parameters)
+        => PostAsync("/api/v1/purge/preview", parameters);
+
+    /// <summary>Execute a purge operation.</summary>
+    public Task<JsonElement> PurgeDataAsync(object parameters)
+        => PostAsync("/api/v1/purge", parameters);
+
+    // -------------------------------------------------------------------------
     // Health
     // -------------------------------------------------------------------------
 
@@ -479,6 +533,42 @@ public class JobcelisClient : IDisposable
     /// <summary>Get platform status.</summary>
     public Task<JsonElement> StatusAsync()
         => GetAsync("/status");
+
+    // -------------------------------------------------------------------------
+    // Embed Tokens
+    // -------------------------------------------------------------------------
+
+    /// <summary>List embed tokens.</summary>
+    public Task<JsonElement> ListEmbedTokensAsync()
+        => GetAsync("/api/v1/embed/tokens");
+
+    /// <summary>Create an embed token.</summary>
+    public Task<JsonElement> CreateEmbedTokenAsync(object config)
+        => PostAsync("/api/v1/embed/tokens", config);
+
+    /// <summary>Revoke an embed token.</summary>
+    public Task RevokeEmbedTokenAsync(string id)
+        => DoDeleteAsync($"/api/v1/embed/tokens/{id}");
+
+    // -------------------------------------------------------------------------
+    // Notification Channels
+    // -------------------------------------------------------------------------
+
+    /// <summary>Get the notification channel configuration.</summary>
+    public Task<JsonElement> GetNotificationChannelAsync()
+        => GetAsync("/api/v1/notification-channels");
+
+    /// <summary>Create or update the notification channel configuration.</summary>
+    public Task<JsonElement> UpsertNotificationChannelAsync(object config)
+        => PutAsync("/api/v1/notification-channels", config);
+
+    /// <summary>Delete the notification channel configuration.</summary>
+    public Task DeleteNotificationChannelAsync()
+        => DoDeleteAsync("/api/v1/notification-channels");
+
+    /// <summary>Test the notification channel configuration.</summary>
+    public Task<JsonElement> TestNotificationChannelAsync()
+        => PostAsync("/api/v1/notification-channels/test", new { });
 
     // =========================================================================
     // Private HTTP helpers
@@ -492,6 +582,9 @@ public class JobcelisClient : IDisposable
 
     private Task<JsonElement> PatchAsync(string path, object body)
         => RequestAsync(HttpMethod.Patch, path, body: body);
+
+    private Task<JsonElement> PutAsync(string path, object body)
+        => RequestAsync(HttpMethod.Put, path, body: body);
 
     private Task DoDeleteAsync(string path)
         => RequestAsync(HttpMethod.Delete, path).ContinueWith(_ => { });

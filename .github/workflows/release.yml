@@ -1,0 +1,79 @@
+# Publishes automatically when the version below changes on main:
+#   1. reads the version from src/Jobcelis/Jobcelis.csproj
+#   2. if NuGet does not have it yet, packs it and pushes it
+#   3. tags the commit (vX.Y.Z)
+# Bump the version in src/Jobcelis/Jobcelis.csproj to release; any other change publishes nothing.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version
+        id: v
+        run: |
+          VERSION=$(grep -m1 -oE '<Version>[^<]+' src/Jobcelis/Jobcelis.csproj | sed 's/<Version>//')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+
+      - name: Already released?
+        id: check
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          MISSING=""
+          [ -n "$NUGET_API_KEY" ] || MISSING="$MISSING NUGET_API_KEY"
+          if [ -n "$MISSING" ]; then
+            echo "::warning::Not publishing: add the repository secret(s)$MISSING, then run this workflow again (Actions > Release > Run workflow)."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if curl -s "https://api.nuget.org/v3-flatcontainer/jobcelis/index.json" | grep -q "\"${{ steps.v.outputs.version }}\""; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "${{ steps.v.outputs.version }} is already published: nothing to do"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-dotnet@v4
+        if: steps.check.outputs.release == 'true'
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Pack
+        if: steps.check.outputs.release == 'true'
+        run: dotnet pack src/Jobcelis/Jobcelis.csproj -c Release -o ./nupkg
+
+      - name: Publish to NuGet
+        if: steps.check.outputs.release == 'true'
+        run: dotnet nuget push ./nupkg/*.nupkg --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+      - name: Tag the release
+        if: steps.check.outputs.release == 'true'
+        run: |
+          TAG="${{ steps.v.outputs.tag }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            echo "Tag $TAG already exists"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" -m "$TAG"
+            git push origin "$TAG"
+          fi

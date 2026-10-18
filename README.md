@@ -361,3 +361,7 @@ public async Task<IActionResult> HandleWebhook()
 ## License
 
 BSL-1.1 (Business Source License)
+
+## Releasing
+
+Bump the version in `src/Jobcelis/Jobcelis.csproj` and merge to `main`. The [Release workflow](.github/workflows/release.yml) publishes it to NuGet and tags the commit. Changes that do not bump the version publish nothing.

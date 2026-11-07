@@ -364,4 +364,4 @@ BSL-1.1 (Business Source License)
 
 ## Releasing
 
-Bump the version in `src/Jobcelis/Jobcelis.csproj` and merge to `main`. The [Release workflow](.github/workflows/release.yml) publishes it to NuGet and tags the commit. Changes that do not bump the version publish nothing.
+Merge to `main`: the [Release workflow](.github/workflows/release.yml) publishes every change to the package as the next patch version (1.3.1 → 1.3.2) to NuGet, writes the version into `src/Jobcelis/Jobcelis.csproj` and tags the commit. Changes to docs, tests or CI publish nothing. For a minor or major version, raise it in `src/Jobcelis/Jobcelis.csproj` in the same pull request. Every pull request runs [CI](.github/workflows/ci.yml).

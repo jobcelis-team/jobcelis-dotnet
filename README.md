@@ -319,6 +319,26 @@ var health = await client.HealthAsync();
 var status = await client.StatusAsync();
 ```
 
+## Retries
+
+The client retries failed requests automatically, so a short outage (for example while the API is being deployed) does not lose your events:
+
+- Network errors (connection refused or reset, DNS or TLS failures, timeouts) and HTTP 429, 502, 503 and 504 are retried.
+- Up to 6 retries by default, with exponential backoff (1 s, 2 s, 4 s, 8 s, 16 s, 30 s, plus or minus 20 % jitter): about 60 seconds in total. A `Retry-After` header from the server is honoured (up to 60 s).
+- `POST` requests are retried on 429/502/503/504, but after a network error only when they carry an idempotency key, because the server may already have processed them. Other errors (400, 404, 500, ...) are never retried and throw `JobcelisException` as usual.
+- Events are always safe to retry: `SendEventAsync` sends a random idempotency key in the `X-Idempotency-Key` header (the same key on every retry), and `SendEventsAsync` adds an `idempotency_key` to every event that does not have one. To use your own key:
+
+```csharp
+await client.SendEventAsync("order.created", new { order_id = "123" }, idempotencyKey: "order-123");
+```
+
+Change or disable retries with `maxRetries`:
+
+```csharp
+var client = new JobcelisClient("your_api_key", maxRetries: 3);  // at most 3 retries
+var noRetries = new JobcelisClient("your_api_key", maxRetries: 0);  // a single attempt
+```
+
 ## Error Handling
 
 ```csharp

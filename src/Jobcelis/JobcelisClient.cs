@@ -682,7 +682,7 @@ public class JobcelisClient : IDisposable
         return responseBody;
     }
 
-    /// <param name="idempotentBody">True when the body itself carries idempotency keys (batch events).</param>
+    // idempotentBody: the body itself carries idempotency keys (batch events).
     private async Task<JsonElement> SendAsync(HttpMethod method, string url, string? json, bool useApiKey,
         string? idempotencyKey = null, bool idempotentBody = false)
     {

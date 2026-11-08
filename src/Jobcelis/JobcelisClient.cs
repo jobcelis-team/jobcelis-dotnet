@@ -1,6 +1,7 @@
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using System.Web;
 
@@ -15,6 +16,12 @@ public class JobcelisClient : IDisposable
     private readonly HttpClient _http;
     private readonly string _apiKey;
     private string? _authToken;
+
+    /// <summary>Default number of retries for a failed request (about 60 seconds of backoff in total).</summary>
+    public const int DefaultMaxRetries = 6;
+
+    private static readonly TimeSpan MaxBackoff = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan MaxRetryAfter = TimeSpan.FromSeconds(60);
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
@@ -28,11 +35,31 @@ public class JobcelisClient : IDisposable
     /// <param name="baseUrl">Base URL of the Jobcelis API (default: https://jobcelis.com).</param>
     /// <param name="httpClient">Optional HttpClient to use (for testing/DI).</param>
     public JobcelisClient(string apiKey, string baseUrl = "https://jobcelis.com", HttpClient? httpClient = null)
+        : this(apiKey, DefaultMaxRetries, baseUrl, httpClient)
     {
+    }
+
+    /// <summary>
+    /// Create a new Jobcelis client with a custom number of retries.
+    /// </summary>
+    /// <param name="apiKey">Your Jobcelis API key.</param>
+    /// <param name="maxRetries">How many times a failed request is retried (default 6, 0 disables retries).</param>
+    /// <param name="baseUrl">Base URL of the Jobcelis API (default: https://jobcelis.com).</param>
+    /// <param name="httpClient">Optional HttpClient to use (for testing/DI).</param>
+    public JobcelisClient(string apiKey, int maxRetries, string baseUrl = "https://jobcelis.com", HttpClient? httpClient = null)
+    {
+        if (maxRetries < 0) throw new ArgumentOutOfRangeException(nameof(maxRetries), "maxRetries must be 0 or greater.");
         _apiKey = apiKey;
+        MaxRetries = maxRetries;
         _http = httpClient ?? new HttpClient();
         _http.BaseAddress = new Uri(baseUrl.TrimEnd('/'));
     }
+
+    /// <summary>How many times a failed request is retried. 0 means retries are disabled.</summary>
+    public int MaxRetries { get; }
+
+    /// <summary>Delay before the first retry; it doubles on every retry. Lowered by the tests.</summary>
+    internal TimeSpan RetryBaseDelay { get; set; } = TimeSpan.FromSeconds(1);
 
     /// <summary>Set JWT bearer token for authenticated requests.</summary>
     public void SetAuthToken(string token) => _authToken = token;
@@ -65,13 +92,24 @@ public class JobcelisClient : IDisposable
     // Events
     // -------------------------------------------------------------------------
 
-    /// <summary>Send a single event.</summary>
+    /// <summary>
+    /// Send a single event. A random idempotency key is sent in the X-Idempotency-Key header
+    /// (the same one on every retry), so a retried request never creates a duplicate event.
+    /// </summary>
     public Task<JsonElement> SendEventAsync(string topic, object payload)
-        => PostAsync("/api/v1/events", new { topic, payload });
+        => SendEventAsync(topic, payload, Guid.NewGuid().ToString());
 
-    /// <summary>Send up to 1000 events in a batch.</summary>
+    /// <summary>Send a single event with your own idempotency key (sent in the X-Idempotency-Key header).</summary>
+    public Task<JsonElement> SendEventAsync(string topic, object payload, string idempotencyKey)
+        => PostAsync("/api/v1/events", new { topic, payload }, idempotencyKey ?? Guid.NewGuid().ToString());
+
+    /// <summary>
+    /// Send up to 1000 events in a batch. Every event without an <c>idempotency_key</c> field
+    /// gets a random one, so a retried request never creates duplicate events.
+    /// </summary>
     public Task<JsonElement> SendEventsAsync(IEnumerable<object> events)
-        => PostAsync("/api/v1/events/batch", new { events });
+        => PostAsync("/api/v1/events/batch", new { events = WithIdempotencyKeys(events) },
+            idempotencyKey: null, idempotentBody: true);
 
     /// <summary>Get event details.</summary>
     public Task<JsonElement> GetEventAsync(string eventId)
@@ -590,8 +628,10 @@ public class JobcelisClient : IDisposable
     private Task<JsonElement> GetAsync(string path, Dictionary<string, string?>? parameters = null)
         => RequestAsync(HttpMethod.Get, path, parameters: parameters);
 
-    private Task<JsonElement> PostAsync(string path, object body)
-        => RequestAsync(HttpMethod.Post, path, body: body);
+    private Task<JsonElement> PostAsync(string path, object body, string? idempotencyKey = null,
+        bool idempotentBody = false)
+        => RequestAsync(HttpMethod.Post, path, body: body, idempotencyKey: idempotencyKey,
+            idempotentBody: idempotentBody);
 
     private Task<JsonElement> PatchAsync(string path, object body)
         => RequestAsync(HttpMethod.Patch, path, body: body);
@@ -606,34 +646,29 @@ public class JobcelisClient : IDisposable
         => RequestRawAsync(HttpMethod.Get, path, parameters);
 
     private Task<JsonElement> PublicPostAsync(string path, object body)
-    {
-        var json = JsonSerializer.Serialize(body, JsonOpts);
-        var content = new StringContent(json, Encoding.UTF8, "application/json");
-        return SendAsync(HttpMethod.Post, path, content, useApiKey: false);
-    }
+        => SendAsync(HttpMethod.Post, path, JsonSerializer.Serialize(body, JsonOpts), useApiKey: false);
 
     private async Task<JsonElement> RequestAsync(HttpMethod method, string path,
-        Dictionary<string, string?>? parameters = null, object? body = null)
+        Dictionary<string, string?>? parameters = null, object? body = null, string? idempotencyKey = null,
+        bool idempotentBody = false)
     {
         var url = BuildUrl(path, parameters);
-        HttpContent? content = null;
-        if (body != null)
-        {
-            var json = JsonSerializer.Serialize(body, JsonOpts);
-            content = new StringContent(json, Encoding.UTF8, "application/json");
-        }
-        return await SendAsync(method, url, content, useApiKey: true);
+        var json = body != null ? JsonSerializer.Serialize(body, JsonOpts) : null;
+        return await SendAsync(method, url, json, useApiKey: true, idempotencyKey: idempotencyKey,
+            idempotentBody: idempotentBody);
     }
 
     private async Task<string> RequestRawAsync(HttpMethod method, string path,
         Dictionary<string, string?>? parameters = null)
     {
         var url = BuildUrl(path, parameters);
-        using var request = new HttpRequestMessage(method, url);
-        request.Headers.Add("X-Api-Key", _apiKey);
-        if (_authToken != null) request.Headers.Add("Authorization", $"Bearer {_authToken}");
-
-        var response = await _http.SendAsync(request);
+        using var response = await SendWithRetriesAsync(method, () =>
+        {
+            var request = new HttpRequestMessage(method, url);
+            request.Headers.Add("X-Api-Key", _apiKey);
+            if (_authToken != null) request.Headers.Add("Authorization", $"Bearer {_authToken}");
+            return request;
+        }, hasIdempotencyKey: false);
         var responseBody = await response.Content.ReadAsStringAsync();
 
         if (!response.IsSuccessStatusCode)
@@ -647,15 +682,20 @@ public class JobcelisClient : IDisposable
         return responseBody;
     }
 
-    private async Task<JsonElement> SendAsync(HttpMethod method, string url, HttpContent? content, bool useApiKey)
+    /// <param name="idempotentBody">True when the body itself carries idempotency keys (batch events).</param>
+    private async Task<JsonElement> SendAsync(HttpMethod method, string url, string? json, bool useApiKey,
+        string? idempotencyKey = null, bool idempotentBody = false)
     {
-        using var request = new HttpRequestMessage(method, url);
-        request.Headers.Add("Accept", "application/json");
-        if (useApiKey) request.Headers.Add("X-Api-Key", _apiKey);
-        if (_authToken != null) request.Headers.Add("Authorization", $"Bearer {_authToken}");
-        if (content != null) request.Content = content;
-
-        var response = await _http.SendAsync(request);
+        using var response = await SendWithRetriesAsync(method, () =>
+        {
+            var request = new HttpRequestMessage(method, url);
+            request.Headers.Add("Accept", "application/json");
+            if (useApiKey) request.Headers.Add("X-Api-Key", _apiKey);
+            if (_authToken != null) request.Headers.Add("Authorization", $"Bearer {_authToken}");
+            if (idempotencyKey != null) request.Headers.Add("X-Idempotency-Key", idempotencyKey);
+            if (json != null) request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+            return request;
+        }, hasIdempotencyKey: idempotencyKey != null || idempotentBody);
         var responseBody = await response.Content.ReadAsStringAsync();
 
         if (response.StatusCode == System.Net.HttpStatusCode.NoContent)
@@ -670,6 +710,94 @@ public class JobcelisClient : IDisposable
         }
 
         return JsonSerializer.Deserialize<JsonElement>(responseBody);
+    }
+
+    // =========================================================================
+    // Retries
+    // =========================================================================
+
+    /// <summary>
+    /// Sends a request, retrying on network errors and on HTTP 429/502/503/504 with exponential
+    /// backoff. A fresh request is built for every attempt because a request cannot be sent twice.
+    /// POST requests are only retried after a network error when they carry an idempotency key,
+    /// since the server may already have processed them.
+    /// </summary>
+    private async Task<HttpResponseMessage> SendWithRetriesAsync(HttpMethod method,
+        Func<HttpRequestMessage> buildRequest, bool hasIdempotencyKey)
+    {
+        var retryOnNetworkError = method != HttpMethod.Post || hasIdempotencyKey;
+        for (var attempt = 1; ; attempt++)
+        {
+            HttpResponseMessage response;
+            using (var request = buildRequest())
+            {
+                try
+                {
+                    response = await _http.SendAsync(request);
+                }
+                catch (Exception ex) when (IsNetworkError(ex) && retryOnNetworkError && attempt <= MaxRetries)
+                {
+                    await Task.Delay(BackoffDelay(attempt));
+                    continue;
+                }
+            }
+
+            if (attempt <= MaxRetries && IsRetryableStatus((int)response.StatusCode))
+            {
+                var delay = RetryAfterDelay(response) ?? BackoffDelay(attempt);
+                response.Dispose();
+                await Task.Delay(delay);
+                continue;
+            }
+
+            return response;
+        }
+    }
+
+    private static bool IsNetworkError(Exception ex)
+        // HttpRequestException covers refused/reset connections, DNS and TLS failures;
+        // TaskCanceledException is what HttpClient throws when its timeout elapses.
+        => ex is HttpRequestException || ex is TaskCanceledException;
+
+    private static bool IsRetryableStatus(int status)
+        => status == 429 || status == 502 || status == 503 || status == 504;
+
+    /// <summary>min(30 s, base * 2^(n-1)) with +/-20 % jitter, where n = 1 for the first retry.</summary>
+    private TimeSpan BackoffDelay(int retry)
+    {
+        var baseMs = RetryBaseDelay.TotalMilliseconds * Math.Pow(2, retry - 1);
+        var cappedMs = Math.Min(MaxBackoff.TotalMilliseconds, baseMs);
+        var jitter = 1 + (Random.Shared.NextDouble() * 0.4 - 0.2);
+        return TimeSpan.FromMilliseconds(Math.Max(0, cappedMs * jitter));
+    }
+
+    /// <summary>The delay requested by a Retry-After header (seconds or HTTP date), capped at 60 s.</summary>
+    private static TimeSpan? RetryAfterDelay(HttpResponseMessage response)
+    {
+        var retryAfter = response.Headers.RetryAfter;
+        if (retryAfter == null) return null;
+
+        TimeSpan delay;
+        if (retryAfter.Delta is TimeSpan delta) delay = delta;
+        else if (retryAfter.Date is DateTimeOffset date) delay = date - DateTimeOffset.UtcNow;
+        else return null;
+
+        if (delay < TimeSpan.Zero) delay = TimeSpan.Zero;
+        return delay > MaxRetryAfter ? MaxRetryAfter : delay;
+    }
+
+    /// <summary>Adds a new idempotency_key to every batch item that does not have one.</summary>
+    private static List<JsonNode?> WithIdempotencyKeys(IEnumerable<object> events)
+    {
+        var items = new List<JsonNode?>();
+        foreach (var evt in events)
+        {
+            var node = JsonSerializer.SerializeToNode(evt, JsonOpts);
+            if (node is JsonObject obj && !obj.ContainsKey("idempotency_key"))
+                obj["idempotency_key"] = Guid.NewGuid().ToString();
+            items.Add(node);
+        }
+        return items;
     }
 
     private static string BuildUrl(string path, Dictionary<string, string?>? parameters)

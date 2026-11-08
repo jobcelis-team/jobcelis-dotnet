@@ -19,5 +19,8 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
+      - name: Test
+        run: dotnet test tests/Jobcelis.Tests/Jobcelis.Tests.csproj -c Release --logger "console;verbosity=normal"
+
       - name: Pack
         run: dotnet pack src/Jobcelis/Jobcelis.csproj -c Release -o ./nupkg

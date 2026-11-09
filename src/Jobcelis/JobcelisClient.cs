@@ -639,8 +639,8 @@ public class JobcelisClient : IDisposable
     private Task<JsonElement> PutAsync(string path, object body)
         => RequestAsync(HttpMethod.Put, path, body: body);
 
-    private Task DoDeleteAsync(string path)
-        => RequestAsync(HttpMethod.Delete, path).ContinueWith(_ => { });
+    private async Task DoDeleteAsync(string path)
+        => await RequestAsync(HttpMethod.Delete, path);
 
     private Task<string> GetRawAsync(string path, Dictionary<string, string?>? parameters = null)
         => RequestRawAsync(HttpMethod.Get, path, parameters);

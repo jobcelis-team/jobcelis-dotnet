@@ -385,3 +385,5 @@ BSL-1.1 (Business Source License)
 ## Releasing
 
 Merge to `main`: the [Release workflow](.github/workflows/release.yml) publishes every change to the package as the next patch version (1.3.1 → 1.3.2) to NuGet, writes the version into `src/Jobcelis/Jobcelis.csproj` and tags the commit. Changes to docs, tests or CI publish nothing. For a minor or major version, raise it in `src/Jobcelis/Jobcelis.csproj` in the same pull request. Every pull request runs [CI](.github/workflows/ci.yml).
+
+Publishing uses [NuGet Trusted Publishing](https://learn.microsoft.com/nuget/nuget-org/trusted-publishing): the workflow exchanges GitHub's identity for a short-lived API key on each run, so no NuGet API key is stored in the repository. The nuget.org policy must point to owner `jobcelis-team`, repository `jobcelis-dotnet`, workflow `release.yml`, package `Jobcelis`.

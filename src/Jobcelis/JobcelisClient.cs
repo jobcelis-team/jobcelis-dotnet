@@ -14,8 +14,10 @@ namespace Jobcelis;
 public class JobcelisClient : IDisposable
 {
     private readonly HttpClient _http;
+    private readonly bool _ownsHttpClient;
+    private readonly string _baseUrl;
     private readonly string _apiKey;
-    private string? _authToken;
+    private volatile string? _authToken;
 
     /// <summary>Default number of retries for a failed request (about 60 seconds of backoff in total).</summary>
     public const int DefaultMaxRetries = 6;
@@ -28,12 +30,16 @@ public class JobcelisClient : IDisposable
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
+    // Event payloads, schemas and pipeline steps are your data: they are sent with the
+    // property names you gave them, without the snake_case policy used for request fields.
+    private static readonly JsonSerializerOptions RawJsonOpts = new();
+
     /// <summary>
     /// Create a new Jobcelis client.
     /// </summary>
     /// <param name="apiKey">Your Jobcelis API key.</param>
     /// <param name="baseUrl">Base URL of the Jobcelis API (default: https://jobcelis.com).</param>
-    /// <param name="httpClient">Optional HttpClient to use (for testing/DI).</param>
+    /// <param name="httpClient">Optional HttpClient to use (for testing/DI). It is not modified or disposed by the client.</param>
     public JobcelisClient(string apiKey, string baseUrl = "https://jobcelis.com", HttpClient? httpClient = null)
         : this(apiKey, DefaultMaxRetries, baseUrl, httpClient)
     {
@@ -45,14 +51,15 @@ public class JobcelisClient : IDisposable
     /// <param name="apiKey">Your Jobcelis API key.</param>
     /// <param name="maxRetries">How many times a failed request is retried (default 6, 0 disables retries).</param>
     /// <param name="baseUrl">Base URL of the Jobcelis API (default: https://jobcelis.com).</param>
-    /// <param name="httpClient">Optional HttpClient to use (for testing/DI).</param>
+    /// <param name="httpClient">Optional HttpClient to use (for testing/DI). It is not modified or disposed by the client.</param>
     public JobcelisClient(string apiKey, int maxRetries, string baseUrl = "https://jobcelis.com", HttpClient? httpClient = null)
     {
         if (maxRetries < 0) throw new ArgumentOutOfRangeException(nameof(maxRetries), "maxRetries must be 0 or greater.");
         _apiKey = apiKey;
         MaxRetries = maxRetries;
-        _http = httpClient ?? new HttpClient();
-        _http.BaseAddress = new Uri(baseUrl.TrimEnd('/'));
+        _baseUrl = baseUrl.TrimEnd('/');
+        _ownsHttpClient = httpClient == null;
+        _http = httpClient ?? new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
     }
 
     /// <summary>How many times a failed request is retried. 0 means retries are disabled.</summary>
@@ -101,7 +108,7 @@ public class JobcelisClient : IDisposable
 
     /// <summary>Send a single event with your own idempotency key (sent in the X-Idempotency-Key header).</summary>
     public Task<JsonElement> SendEventAsync(string topic, object payload, string idempotencyKey)
-        => PostAsync("/api/v1/events", new { topic, payload }, idempotencyKey ?? Guid.NewGuid().ToString());
+        => PostAsync("/api/v1/events", new { topic, payload = Raw(payload) }, idempotencyKey ?? Guid.NewGuid().ToString());
 
     /// <summary>
     /// Send up to 1000 events in a batch. Every event without an <c>idempotency_key</c> field
@@ -113,7 +120,7 @@ public class JobcelisClient : IDisposable
 
     /// <summary>Get event details.</summary>
     public Task<JsonElement> GetEventAsync(string eventId)
-        => GetAsync($"/api/v1/events/{eventId}");
+        => GetAsync($"/api/v1/events/{E(eventId)}");
 
     /// <summary>List events with cursor pagination.</summary>
     public Task<JsonElement> ListEventsAsync(int limit = 50, string? cursor = null)
@@ -121,7 +128,7 @@ public class JobcelisClient : IDisposable
 
     /// <summary>Delete an event.</summary>
     public Task DeleteEventAsync(string eventId)
-        => DoDeleteAsync($"/api/v1/events/{eventId}");
+        => DoDeleteAsync($"/api/v1/events/{E(eventId)}");
 
     // -------------------------------------------------------------------------
     // Simulate
@@ -129,7 +136,7 @@ public class JobcelisClient : IDisposable
 
     /// <summary>Simulate sending an event (dry run).</summary>
     public Task<JsonElement> SimulateEventAsync(string topic, object payload)
-        => PostAsync("/api/v1/simulate", new { topic, payload });
+        => PostAsync("/api/v1/simulate", new { topic, payload = Raw(payload) });
 
     // -------------------------------------------------------------------------
     // Webhooks
@@ -157,7 +164,7 @@ public class JobcelisClient : IDisposable
 
     /// <summary>Get webhook details.</summary>
     public Task<JsonElement> GetWebhookAsync(string webhookId)
-        => GetAsync($"/api/v1/webhooks/{webhookId}");
+        => GetAsync($"/api/v1/webhooks/{E(webhookId)}");
 
     /// <summary>List webhooks.</summary>
     public Task<JsonElement> ListWebhooksAsync(int limit = 50, string? cursor = null)
@@ -165,7 +172,7 @@ public class JobcelisClient : IDisposable
 
     /// <summary>Update a webhook.</summary>
     public Task<JsonElement> UpdateWebhookAsync(string webhookId, object data)
-        => PatchAsync($"/api/v1/webhooks/{webhookId}", data);
+        => PatchAsync($"/api/v1/webhooks/{E(webhookId)}", data);
 
     /// <summary>Update a webhook with explicit rate limit parameters.</summary>
     /// <param name="webhookId">The webhook ID.</param>
@@ -182,16 +189,16 @@ public class JobcelisClient : IDisposable
             if (rateLimitMaxPerMinute != null) rateLimit["max_per_minute"] = rateLimitMaxPerMinute;
             data["rate_limit"] = rateLimit;
         }
-        return PatchAsync($"/api/v1/webhooks/{webhookId}", data);
+        return PatchAsync($"/api/v1/webhooks/{E(webhookId)}", data);
     }
 
     /// <summary>Delete a webhook.</summary>
     public Task DeleteWebhookAsync(string webhookId)
-        => DoDeleteAsync($"/api/v1/webhooks/{webhookId}");
+        => DoDeleteAsync($"/api/v1/webhooks/{E(webhookId)}");
 
     /// <summary>Get health status for a webhook.</summary>
     public Task<JsonElement> WebhookHealthAsync(string webhookId)
-        => GetAsync($"/api/v1/webhooks/{webhookId}/health");
+        => GetAsync($"/api/v1/webhooks/{E(webhookId)}/health");
 
     /// <summary>List available webhook templates.</summary>
     public Task<JsonElement> WebhookTemplatesAsync()
@@ -199,7 +206,7 @@ public class JobcelisClient : IDisposable
 
     /// <summary>Send a test delivery to a webhook.</summary>
     public Task<JsonElement> TestWebhookAsync(string webhookId)
-        => PostAsync($"/api/v1/webhooks/{webhookId}/test", new { });
+        => PostAsync($"/api/v1/webhooks/{E(webhookId)}/test", new { });
 
     // -------------------------------------------------------------------------
     // Deliveries
@@ -211,7 +218,7 @@ public class JobcelisClient : IDisposable
 
     /// <summary>Retry a failed delivery.</summary>
     public Task<JsonElement> RetryDeliveryAsync(string deliveryId)
-        => PostAsync($"/api/v1/deliveries/{deliveryId}/retry", new { });
+        => PostAsync($"/api/v1/deliveries/{E(deliveryId)}/retry", new { });
 
     // -------------------------------------------------------------------------
     // Dead Letters
@@ -223,15 +230,15 @@ public class JobcelisClient : IDisposable
 
     /// <summary>Get dead letter details.</summary>
     public Task<JsonElement> GetDeadLetterAsync(string deadLetterId)
-        => GetAsync($"/api/v1/dead-letters/{deadLetterId}");
+        => GetAsync($"/api/v1/dead-letters/{E(deadLetterId)}");
 
     /// <summary>Retry a dead letter.</summary>
     public Task<JsonElement> RetryDeadLetterAsync(string deadLetterId)
-        => PostAsync($"/api/v1/dead-letters/{deadLetterId}/retry", new { });
+        => PostAsync($"/api/v1/dead-letters/{E(deadLetterId)}/retry", new { });
 
     /// <summary>Mark a dead letter as resolved.</summary>
     public Task<JsonElement> ResolveDeadLetterAsync(string deadLetterId)
-        => PatchAsync($"/api/v1/dead-letters/{deadLetterId}/resolve", new { });
+        => PatchAsync($"/api/v1/dead-letters/{E(deadLetterId)}/resolve", new { });
 
     // -------------------------------------------------------------------------
     // Replays
@@ -251,11 +258,11 @@ public class JobcelisClient : IDisposable
 
     /// <summary>Get replay details.</summary>
     public Task<JsonElement> GetReplayAsync(string replayId)
-        => GetAsync($"/api/v1/replays/{replayId}");
+        => GetAsync($"/api/v1/replays/{E(replayId)}");
 
     /// <summary>Cancel a replay.</summary>
     public Task CancelReplayAsync(string replayId)
-        => DoDeleteAsync($"/api/v1/replays/{replayId}");
+        => DoDeleteAsync($"/api/v1/replays/{E(replayId)}");
 
     // -------------------------------------------------------------------------
     // Jobs
@@ -275,19 +282,19 @@ public class JobcelisClient : IDisposable
 
     /// <summary>Get job details.</summary>
     public Task<JsonElement> GetJobAsync(string jobId)
-        => GetAsync($"/api/v1/jobs/{jobId}");
+        => GetAsync($"/api/v1/jobs/{E(jobId)}");
 
     /// <summary>Update a scheduled job.</summary>
     public Task<JsonElement> UpdateJobAsync(string jobId, object data)
-        => PatchAsync($"/api/v1/jobs/{jobId}", data);
+        => PatchAsync($"/api/v1/jobs/{E(jobId)}", data);
 
     /// <summary>Delete a scheduled job.</summary>
     public Task DeleteJobAsync(string jobId)
-        => DoDeleteAsync($"/api/v1/jobs/{jobId}");
+        => DoDeleteAsync($"/api/v1/jobs/{E(jobId)}");
 
     /// <summary>List runs for a scheduled job.</summary>
     public Task<JsonElement> ListJobRunsAsync(string jobId, int limit = 50)
-        => GetAsync($"/api/v1/jobs/{jobId}/runs", new() { ["limit"] = limit.ToString() });
+        => GetAsync($"/api/v1/jobs/{E(jobId)}/runs", new() { ["limit"] = limit.ToString() });
 
     /// <summary>Preview next occurrences for a cron expression.</summary>
     public Task<JsonElement> CronPreviewAsync(string expression, int count = 5)
@@ -297,9 +304,18 @@ public class JobcelisClient : IDisposable
     // Pipelines
     // -------------------------------------------------------------------------
 
-    /// <summary>Create an event pipeline.</summary>
+    /// <summary>Create an event pipeline that delivers to the given webhook.</summary>
+    /// <param name="name">Pipeline name.</param>
+    /// <param name="webhookId">ID of the webhook the pipeline delivers to (required by the API).</param>
+    /// <param name="topics">Topics the pipeline processes.</param>
+    /// <param name="steps">Processing steps (filter, transform, delay, ...).</param>
+    public Task<JsonElement> CreatePipelineAsync(string name, string webhookId, IEnumerable<string> topics, IEnumerable<object> steps)
+        => PostAsync("/api/v1/pipelines", new { name, webhook_id = webhookId, topics, steps = Raw(steps) });
+
+    /// <summary>Removed: the API requires a webhook ID to create a pipeline.</summary>
+    [Obsolete("The API requires a webhook ID: use CreatePipelineAsync(name, webhookId, topics, steps).", true)]
     public Task<JsonElement> CreatePipelineAsync(string name, IEnumerable<string> topics, IEnumerable<object> steps)
-        => PostAsync("/api/v1/pipelines", new { name, topics, steps });
+        => throw new NotSupportedException("Use CreatePipelineAsync(name, webhookId, topics, steps).");
 
     /// <summary>List pipelines.</summary>
     public Task<JsonElement> ListPipelinesAsync(int limit = 50, string? cursor = null)
@@ -307,19 +323,19 @@ public class JobcelisClient : IDisposable
 
     /// <summary>Get pipeline details.</summary>
     public Task<JsonElement> GetPipelineAsync(string pipelineId)
-        => GetAsync($"/api/v1/pipelines/{pipelineId}");
+        => GetAsync($"/api/v1/pipelines/{E(pipelineId)}");
 
     /// <summary>Update a pipeline.</summary>
     public Task<JsonElement> UpdatePipelineAsync(string pipelineId, object data)
-        => PatchAsync($"/api/v1/pipelines/{pipelineId}", data);
+        => PatchAsync($"/api/v1/pipelines/{E(pipelineId)}", data);
 
     /// <summary>Delete a pipeline.</summary>
     public Task DeletePipelineAsync(string pipelineId)
-        => DoDeleteAsync($"/api/v1/pipelines/{pipelineId}");
+        => DoDeleteAsync($"/api/v1/pipelines/{E(pipelineId)}");
 
     /// <summary>Test a pipeline with a sample payload.</summary>
     public Task<JsonElement> TestPipelineAsync(string pipelineId, object payload)
-        => PostAsync($"/api/v1/pipelines/{pipelineId}/test", payload);
+        => PostAsync($"/api/v1/pipelines/{E(pipelineId)}/test", new { payload = Raw(payload) });
 
     // -------------------------------------------------------------------------
     // Event Schemas
@@ -327,7 +343,7 @@ public class JobcelisClient : IDisposable
 
     /// <summary>Create an event schema.</summary>
     public Task<JsonElement> CreateEventSchemaAsync(string topic, object schema)
-        => PostAsync("/api/v1/event-schemas", new { topic, schema });
+        => PostAsync("/api/v1/event-schemas", new { topic, schema = Raw(schema) });
 
     /// <summary>List event schemas.</summary>
     public Task<JsonElement> ListEventSchemasAsync(int limit = 50, string? cursor = null)
@@ -335,19 +351,19 @@ public class JobcelisClient : IDisposable
 
     /// <summary>Get event schema details.</summary>
     public Task<JsonElement> GetEventSchemaAsync(string schemaId)
-        => GetAsync($"/api/v1/event-schemas/{schemaId}");
+        => GetAsync($"/api/v1/event-schemas/{E(schemaId)}");
 
     /// <summary>Update an event schema.</summary>
     public Task<JsonElement> UpdateEventSchemaAsync(string schemaId, object data)
-        => PatchAsync($"/api/v1/event-schemas/{schemaId}", data);
+        => PatchAsync($"/api/v1/event-schemas/{E(schemaId)}", data);
 
     /// <summary>Delete an event schema.</summary>
     public Task DeleteEventSchemaAsync(string schemaId)
-        => DoDeleteAsync($"/api/v1/event-schemas/{schemaId}");
+        => DoDeleteAsync($"/api/v1/event-schemas/{E(schemaId)}");
 
     /// <summary>Validate a payload against the schema for a topic.</summary>
     public Task<JsonElement> ValidatePayloadAsync(string topic, object payload)
-        => PostAsync("/api/v1/event-schemas/validate", new { topic, payload });
+        => PostAsync("/api/v1/event-schemas/validate", new { topic, payload = Raw(payload) });
 
     // -------------------------------------------------------------------------
     // Sandbox
@@ -366,11 +382,11 @@ public class JobcelisClient : IDisposable
 
     /// <summary>Delete a sandbox endpoint.</summary>
     public Task DeleteSandboxEndpointAsync(string endpointId)
-        => DoDeleteAsync($"/api/v1/sandbox-endpoints/{endpointId}");
+        => DoDeleteAsync($"/api/v1/sandbox-endpoints/{E(endpointId)}");
 
     /// <summary>List requests received by a sandbox endpoint.</summary>
     public Task<JsonElement> ListSandboxRequestsAsync(string endpointId, int limit = 50)
-        => GetAsync($"/api/v1/sandbox-endpoints/{endpointId}/requests", new() { ["limit"] = limit.ToString() });
+        => GetAsync($"/api/v1/sandbox-endpoints/{E(endpointId)}/requests", new() { ["limit"] = limit.ToString() });
 
     // -------------------------------------------------------------------------
     // Analytics
@@ -443,19 +459,19 @@ public class JobcelisClient : IDisposable
 
     /// <summary>Get project by ID.</summary>
     public Task<JsonElement> GetProjectByIdAsync(string projectId)
-        => GetAsync($"/api/v1/projects/{projectId}");
+        => GetAsync($"/api/v1/projects/{E(projectId)}");
 
     /// <summary>Update a project by ID.</summary>
     public Task<JsonElement> UpdateProjectByIdAsync(string projectId, object data)
-        => PatchAsync($"/api/v1/projects/{projectId}", data);
+        => PatchAsync($"/api/v1/projects/{E(projectId)}", data);
 
     /// <summary>Delete a project.</summary>
     public Task DeleteProjectAsync(string projectId)
-        => DoDeleteAsync($"/api/v1/projects/{projectId}");
+        => DoDeleteAsync($"/api/v1/projects/{E(projectId)}");
 
     /// <summary>Set a project as the default.</summary>
     public Task<JsonElement> SetDefaultProjectAsync(string projectId)
-        => PatchAsync($"/api/v1/projects/{projectId}/default", new { });
+        => PatchAsync($"/api/v1/projects/{E(projectId)}/default", new { });
 
     // -------------------------------------------------------------------------
     // Teams
@@ -463,19 +479,19 @@ public class JobcelisClient : IDisposable
 
     /// <summary>List members of a project.</summary>
     public Task<JsonElement> ListMembersAsync(string projectId)
-        => GetAsync($"/api/v1/projects/{projectId}/members");
+        => GetAsync($"/api/v1/projects/{E(projectId)}/members");
 
     /// <summary>Add a member to a project.</summary>
-    public Task<JsonElement> AddMemberAsync(string projectId, string email, string role = "member")
-        => PostAsync($"/api/v1/projects/{projectId}/members", new { email, role });
+    public Task<JsonElement> AddMemberAsync(string projectId, string email, string role = "viewer")
+        => PostAsync($"/api/v1/projects/{E(projectId)}/members", new { email, role });
 
     /// <summary>Update a member's role.</summary>
     public Task<JsonElement> UpdateMemberAsync(string projectId, string memberId, string role)
-        => PatchAsync($"/api/v1/projects/{projectId}/members/{memberId}", new { role });
+        => PatchAsync($"/api/v1/projects/{E(projectId)}/members/{E(memberId)}", new { role });
 
     /// <summary>Remove a member from a project.</summary>
     public Task RemoveMemberAsync(string projectId, string memberId)
-        => DoDeleteAsync($"/api/v1/projects/{projectId}/members/{memberId}");
+        => DoDeleteAsync($"/api/v1/projects/{E(projectId)}/members/{E(memberId)}");
 
     // -------------------------------------------------------------------------
     // Invitations
@@ -487,11 +503,11 @@ public class JobcelisClient : IDisposable
 
     /// <summary>Accept an invitation.</summary>
     public Task<JsonElement> AcceptInvitationAsync(string invitationId)
-        => PostAsync($"/api/v1/invitations/{invitationId}/accept", new { });
+        => PostAsync($"/api/v1/invitations/{E(invitationId)}/accept", new { });
 
     /// <summary>Reject an invitation.</summary>
     public Task<JsonElement> RejectInvitationAsync(string invitationId)
-        => PostAsync($"/api/v1/invitations/{invitationId}/reject", new { });
+        => PostAsync($"/api/v1/invitations/{E(invitationId)}/reject", new { });
 
     // -------------------------------------------------------------------------
     // Audit
@@ -531,15 +547,16 @@ public class JobcelisClient : IDisposable
 
     /// <summary>Accept consent for a specific purpose.</summary>
     public Task<JsonElement> AcceptConsentAsync(string purpose)
-        => PostAsync($"/api/v1/me/consents/{purpose}/accept", new { });
+        => PostAsync($"/api/v1/me/consents/{E(purpose)}/accept", new { });
 
     /// <summary>Export all personal data (GDPR data portability).</summary>
     public Task<JsonElement> ExportMyDataAsync()
         => GetAsync("/api/v1/me/data");
 
-    /// <summary>Request restriction of data processing.</summary>
-    public Task<JsonElement> RestrictProcessingAsync()
-        => PostAsync("/api/v1/me/restrict", new { });
+    /// <summary>Request restriction of data processing. The API asks for the account password to confirm it.</summary>
+    /// <param name="password">The current user's password.</param>
+    public Task<JsonElement> RestrictProcessingAsync(string password)
+        => PostAsync("/api/v1/me/restrict", new { password });
 
     /// <summary>Lift restriction on data processing.</summary>
     public Task LiftRestrictionAsync()
@@ -561,9 +578,9 @@ public class JobcelisClient : IDisposable
     public Task<JsonElement> GetRetentionPolicyAsync()
         => GetAsync("/api/v1/retention");
 
-    /// <summary>Update retention policy.</summary>
+    /// <summary>Update retention policy (events_days, deliveries_days, audit_logs_days).</summary>
     public Task<JsonElement> UpdateRetentionPolicyAsync(object policy)
-        => PatchAsync("/api/v1/retention", policy);
+        => PatchAsync("/api/v1/retention", new { retention_policy = policy });
 
     /// <summary>Preview a purge operation.</summary>
     public Task<JsonElement> PreviewPurgeAsync(object parameters)
@@ -581,9 +598,9 @@ public class JobcelisClient : IDisposable
     public Task<JsonElement> HealthAsync()
         => GetAsync("/health");
 
-    /// <summary>Get platform status.</summary>
+    /// <summary>Get platform status. Same as <see cref="HealthAsync"/>: /status is the public HTML status page.</summary>
     public Task<JsonElement> StatusAsync()
-        => GetAsync("/status");
+        => GetAsync("/health");
 
     // -------------------------------------------------------------------------
     // Embed Tokens
@@ -599,7 +616,7 @@ public class JobcelisClient : IDisposable
 
     /// <summary>Revoke an embed token.</summary>
     public Task RevokeEmbedTokenAsync(string id)
-        => DoDeleteAsync($"/api/v1/embed/tokens/{id}");
+        => DoDeleteAsync($"/api/v1/embed/tokens/{E(id)}");
 
     // -------------------------------------------------------------------------
     // Notification Channels
@@ -646,7 +663,7 @@ public class JobcelisClient : IDisposable
         => RequestRawAsync(HttpMethod.Get, path, parameters);
 
     private Task<JsonElement> PublicPostAsync(string path, object body)
-        => SendAsync(HttpMethod.Post, path, JsonSerializer.Serialize(body, JsonOpts), useApiKey: false);
+        => SendAsync(HttpMethod.Post, BuildUrl(path, null), JsonSerializer.Serialize(body, JsonOpts), useApiKey: false);
 
     private async Task<JsonElement> RequestAsync(HttpMethod method, string path,
         Dictionary<string, string?>? parameters = null, object? body = null, string? idempotencyKey = null,
@@ -792,7 +809,7 @@ public class JobcelisClient : IDisposable
         var items = new List<JsonNode?>();
         foreach (var evt in events)
         {
-            var node = JsonSerializer.SerializeToNode(evt, JsonOpts);
+            var node = JsonSerializer.SerializeToNode(evt, RawJsonOpts);
             if (node is JsonObject obj && !obj.ContainsKey("idempotency_key"))
                 obj["idempotency_key"] = Guid.NewGuid().ToString();
             items.Add(node);
@@ -800,22 +817,30 @@ public class JobcelisClient : IDisposable
         return items;
     }
 
-    private static string BuildUrl(string path, Dictionary<string, string?>? parameters)
+    /// <summary>Escapes a value interpolated into a URL path.</summary>
+    private static string E(string value) => Uri.EscapeDataString(value ?? string.Empty);
+
+    /// <summary>Serializes your data with its own property names (no snake_case policy).</summary>
+    private static JsonNode? Raw(object? value)
+        => value == null ? null : JsonSerializer.SerializeToNode(value, value.GetType(), RawJsonOpts);
+
+    private string BuildUrl(string path, Dictionary<string, string?>? parameters)
     {
-        if (parameters == null || parameters.Count == 0) return path;
+        var url = _baseUrl + path;
+        if (parameters == null || parameters.Count == 0) return url;
 
         var filtered = parameters.Where(kv => kv.Value != null);
-        if (!filtered.Any()) return path;
+        if (!filtered.Any()) return url;
 
         var query = string.Join("&", filtered.Select(kv =>
             $"{HttpUtility.UrlEncode(kv.Key)}={HttpUtility.UrlEncode(kv.Value)}"));
-        return $"{path}?{query}";
+        return $"{url}?{query}";
     }
 
-    /// <inheritdoc/>
+    /// <summary>Disposes the HttpClient only when the client created it; an injected one is left alone.</summary>
     public void Dispose()
     {
-        _http.Dispose();
+        if (_ownsHttpClient) _http.Dispose();
         GC.SuppressFinalize(this);
     }
 }

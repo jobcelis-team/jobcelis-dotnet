@@ -27,6 +27,10 @@ var webhooks = await client.ListWebhooksAsync();
 > var client = new JobcelisClient("your_api_key", baseUrl: "https://your-instance.example.com");
 > ```
 
+> **Your own HttpClient:** pass it as `httpClient` (for example one from `IHttpClientFactory`). The client sends absolute URLs built from `baseUrl`, never changes the HttpClient's `BaseAddress` and does not dispose it. A client it creates itself has a 30-second timeout.
+
+> **Your data is sent as is:** event payloads, schemas and pipeline steps keep the property names you give them. Request fields (for example the object passed to `UpdateWebhookAsync`) are still converted to snake_case.
+
 ## Authentication
 
 The auth methods do not require an API key. Use them to register, log in, and manage JWT tokens.
@@ -154,7 +158,8 @@ var preview = await client.CronPreviewAsync("0 9 * * *", count: 10);
 ## Pipelines
 
 ```csharp
-var pipeline = await client.CreatePipelineAsync("order-processing",
+// The pipeline delivers to an existing webhook
+var pipeline = await client.CreatePipelineAsync("order-processing", "wh_abc123",
     new[] { "order.created" },
     new object[]
     {
@@ -169,11 +174,7 @@ await client.UpdatePipelineAsync("pipe_abc123", new { name = "order-processing-v
 await client.DeletePipelineAsync("pipe_abc123");
 
 // Test a pipeline with a sample payload
-var testResult = await client.TestPipelineAsync("pipe_abc123", new
-{
-    topic = "order.created",
-    payload = new { id = "1" }
-});
+var testResult = await client.TestPipelineAsync("pipe_abc123", new { id = "1", amount = 150 });
 ```
 
 ## Event Schemas
@@ -303,8 +304,8 @@ await client.AcceptConsentAsync("marketing");
 // Data portability
 var myData = await client.ExportMyDataAsync();
 
-// Processing restrictions
-await client.RestrictProcessingAsync();
+// Processing restrictions (the account password confirms the request)
+await client.RestrictProcessingAsync("your-password");
 await client.LiftRestrictionAsync();
 
 // Right to object
@@ -316,7 +317,7 @@ await client.RestoreConsentAsync();
 
 ```csharp
 var health = await client.HealthAsync();
-var status = await client.StatusAsync();
+var status = await client.StatusAsync(); // same as HealthAsync()
 ```
 
 ## Retries
